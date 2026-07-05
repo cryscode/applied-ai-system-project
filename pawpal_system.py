@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -51,6 +53,40 @@ class Owner:
         """Return all pending (incomplete) tasks."""
         return [t for t in self.tasks if not t.isCompleted]
 
+    def to_dict(self) -> dict:
+        """Convert this owner (and its pets and tasks) into a JSON-serializable dict.
+
+        Pets are stored once here; tasks reference them by name only, so each
+        pet's data lives in exactly one place.
+        """
+        return {
+            "name": self.name,
+            "availableHours": self.availableHours,
+            "preferences": self.preferences,
+            "constraints": self.constraints,
+            "pets": [pet.to_dict() for pet in self.pets],
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Owner":
+        """Rebuild an Owner (with its pets and tasks) from a to_dict() dictionary.
+
+        Pets are rebuilt first into a name -> Pet lookup so that every task's
+        appliesTo is re-linked to the same shared Pet objects.
+        """
+        pets = [Pet.from_dict(p) for p in data.get("pets", [])]
+        pet_lookup = {pet.name: pet for pet in pets}
+        tasks = [Task.from_dict(t, pet_lookup) for t in data.get("tasks", [])]
+        return cls(
+            name=data["name"],
+            availableHours=data["availableHours"],
+            preferences=list(data.get("preferences", [])),
+            constraints=dict(data.get("constraints", {})),
+            pets=pets,
+            tasks=tasks,
+        )
+
 
 @dataclass
 class Pet:
@@ -78,6 +114,27 @@ class Pet:
     def getSpecies(self) -> str:
         """Return the species of this pet."""
         return self.species
+
+    def to_dict(self) -> dict:
+        """Convert this pet into a JSON-serializable dictionary."""
+        return {
+            "name": self.name,
+            "species": self.species,
+            "age": self.age,
+            "specialNeeds": self.specialNeeds,
+            "dietary": self.dietary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Pet":
+        """Rebuild a Pet from a dictionary produced by to_dict()."""
+        return cls(
+            name=data["name"],
+            species=data["species"],
+            age=data["age"],
+            specialNeeds=dict(data.get("specialNeeds", {})),
+            dietary=dict(data.get("dietary", {})),
+        )
 
 
 @dataclass
@@ -154,6 +211,46 @@ class Task:
 
         return next_time
 
+    def to_dict(self) -> dict:
+        """Convert this task into a JSON-serializable dictionary.
+
+        Two values can't go straight into JSON:
+          - dueDate is a datetime -> store as an ISO-8601 string (or None).
+          - appliesTo holds Pet objects -> store only their names, so we don't
+            duplicate pet data and can reconnect to the real Pet objects on load.
+        """
+        return {
+            "title": self.title,
+            "durationMinutes": self.durationMinutes,
+            "priority": self.priority,
+            "description": self.description,
+            "isCompleted": self.isCompleted,
+            "recurrence": self.recurrence,
+            "startTime": self.startTime,
+            "dueDate": self.dueDate.isoformat() if self.dueDate else None,
+            "appliesTo": [pet.name for pet in self.appliesTo],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, pet_lookup: Dict[str, "Pet"]) -> "Task":
+        """Rebuild a Task from a dictionary produced by to_dict().
+
+        pet_lookup maps pet name -> Pet instance, letting us re-link appliesTo
+        back to the shared Pet objects (names with no matching pet are skipped).
+        """
+        due_raw = data.get("dueDate")
+        return cls(
+            title=data["title"],
+            durationMinutes=data["durationMinutes"],
+            priority=data["priority"],
+            description=data.get("description", ""),
+            isCompleted=data.get("isCompleted", False),
+            recurrence=data.get("recurrence", ""),
+            startTime=data.get("startTime", "00:00"),
+            dueDate=datetime.fromisoformat(due_raw) if due_raw else None,
+            appliesTo=[pet_lookup[name] for name in data.get("appliesTo", []) if name in pet_lookup],
+        )
+
 
 @dataclass
 class ScheduledTask:
@@ -183,6 +280,28 @@ class Scheduler:
         """Retrieve all tasks from the owner's master task list."""
         self.tasks = self.owner.tasks
         return self.tasks
+
+    def save_to_json(self, path: str = "data.json") -> None:
+        """Persist the owner, pets, and tasks to a JSON file on disk.
+
+        The generated schedule (self.schedule) is intentionally not saved: it is
+        derived state that can be rebuilt with generateSchedule() after loading.
+        """
+        state = {"owner": self.owner.to_dict()}
+        Path(path).write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    @classmethod
+    def load_from_json(cls, path: str = "data.json") -> "Scheduler":
+        """Load a Scheduler back from a JSON file written by save_to_json().
+
+        Returns a fresh Scheduler whose owner, pets, and tasks are reconnected to
+        the same shared Pet objects. Raises FileNotFoundError if the file is
+        missing, so callers can fall back to creating an empty system.
+        """
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+        owner = Owner.from_dict(state["owner"])
+        scheduler = cls(owner=owner, pets=list(owner.pets), tasks=list(owner.tasks))
+        return scheduler
 
     def addTask(self, task: Task) -> None:
         """Add a task to the scheduler's task list."""
@@ -324,15 +443,27 @@ class Scheduler:
         return warnings
 
     def explainSchedule(self) -> str:
-        """Return a human-readable explanation of the generated schedule."""
+        """Return a human-readable explanation of the generated schedule.
+
+        Times shown are the task's real clock window (startTime + duration), not
+        the scheduler's internal hour-block indices, so this matches the schedule
+        table the user sees.
+        """
         if not self.schedule:
             return f"No tasks scheduled for {self.owner.name}."
 
+        def clock_window(task: Task) -> str:
+            """Build a real HH:MM-HH:MM window from the task's start time + duration."""
+            hour, minute = (int(x) for x in task.startTime.split(":"))
+            start = hour * 60 + minute
+            end = start + task.durationMinutes
+            return f"{start // 60:02d}:{start % 60:02d} - {end // 60:02d}:{end % 60:02d}"
+
         explanation = f"Daily schedule for {self.owner.name} ({self.owner.availableHours} hours available):\n\n"
 
-        for scheduled in sorted(self.schedule, key=lambda s: s.startTime):
+        for scheduled in sorted(self.schedule, key=lambda s: s.task.startTime):
             priority_label = {1: "High", 2: "Medium", 3: "Low"}.get(scheduled.task.priority, "Unknown")
-            explanation += f"⏰ {scheduled.getTimeSlot()}: {scheduled.task.title} ({scheduled.pet.name})\n"
+            explanation += f"⏰ {clock_window(scheduled.task)}: {scheduled.task.title} ({scheduled.pet.name})\n"
             explanation += f"   Duration: {scheduled.task.durationMinutes} minutes | Priority: {priority_label}\n"
             explanation += f"   Reason: {scheduled.reasoning}\n\n"
 

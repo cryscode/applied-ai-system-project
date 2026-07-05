@@ -42,17 +42,40 @@ pip install -r requirements.txt
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
 
-## 🖥️ Sample Output
+## ✨ Features
 
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
+PawPal+ is built around a small set of scheduling algorithms that turn a raw
+list of pet-care tasks into an ordered, conflict-aware daily plan.
 
-```
-# e.g.:
-# Daily plan for Biscuit (Golden Retriever):
-#   08:00 — Morning walk (30 min) [priority: high]
-#   09:00 — Feeding (10 min) [priority: high]
-#   ...
-```
+- **Priority-first sorting** — `sortTasks()` orders tasks by priority
+  (1 = high → 3 = low), breaking ties by start time and then by longer duration
+  first, so the most urgent work always rises to the top.
+- **Chronological sorting** — `sort_by_time()` re-orders tasks by their `HH:MM`
+  start time (then priority). Because times are zero-padded, a plain string
+  compare gives correct chronological order with no datetime parsing.
+- **Capacity-aware filtering** — `filterByTimeAvailable()` walks tasks in
+  priority order and greedily keeps only what fits inside the owner's available
+  hours, dropping the rest once the daily time budget is spent.
+- **Conflict warnings** — `detectConflicts()` compares every pair of task time
+  windows and flags overlaps. Overlaps on the *same pet* are labelled as pet
+  conflicts; overlaps across *different pets* are flagged as owner-time
+  conflicts (the owner can only be in one place at once).
+- **Conflict resolution** — `handleConflicts()` pushes overlapping blocks
+  forward so the generated schedule stays contiguous and non-overlapping.
+- **Daily / weekly / monthly recurrence** — `Task.isRecurring()`,
+  `getNextOccurrence()`, and `markComplete()` compute the next occurrence of a
+  recurring task. Completing a daily task returns a fresh copy due one day
+  later; weekly advances a week; one-off tasks return `None`.
+- **Automatic re-queue** — `Owner.completeTask()` removes a finished task and,
+  if it recurs, drops its next occurrence back onto the to-do list so the plan
+  never runs dry.
+- **Schedule generation** — `generateSchedule(dayHours)` combines filtering,
+  slot-packing, and conflict resolution in one call, and `explainSchedule()`
+  returns a human-readable rationale for each scheduled block.
+- **Task filtering** — `filterTasks(completed, pet_name)` narrows the list by
+  completion status, by pet, or both.
+- **Persistence** — `save_to_json()` / `load_from_json()` store the owner,
+  pets, and tasks to disk so the app restores state across runs.
 
 ## 🧪 Testing PawPal+
 
@@ -90,7 +113,7 @@ tests\test_pawpal.py ...........................................................
 ```
 
 Confidence Level
-4
+⭐⭐⭐⭐(4/5)
 
 ## 📐 Smarter Scheduling
 
@@ -109,84 +132,32 @@ Confidence Level
 
 Describe your app in numbered steps so a reader can follow along without watching a video:
 
-1. <!-- Describe this step -->
-2. <!-- Describe this step -->
-3. <!-- Describe this step -->
-4. <!-- Describe this step -->
-5. <!-- Add more steps as needed -->
+1. **Set up the owner** — enter the owner's name (**Crystal**) and *available hours today* (**8**), then save. This is the daily time budget the scheduler packs against. Add any preferences (e.g. "morning walks only").
+2. **Add a pet** — add **Luna** (Dog, 3 yrs). Pet names must be unique because they are the persistence key. Record a special need for the active pet (`medication: allergy pill with breakfast`).
+3. **Schedule tasks** — add tasks with a title, duration, priority, recurrence (`once` / `daily` / `weekly`), start time, and the pet(s) they apply to: a `daily` **Morning Walk** at 07:00 (60 min, high), a `daily` **Medication Check** at 09:00 (10 min, medium), and a `weekly` **Grooming Session** at 14:00 (45 min, low). Tasks get an inferred type emoji (🚶 walk, 🍽️ feeding, 💊 meds…) and a color-coded priority badge (🔴/🟡/🟢).
+4. **Sort, filter & spot conflicts** — sort the task list by **priority** or **start time** and filter it by pet. A live banner warns about overlapping time windows: same-pet overlaps vs owner-time overlaps.
+5. **Build & view today's schedule** — click **Generate schedule** to pack tasks into slots (capacity filtering + conflict resolution) and view the plan as a table. Open **See reasoning** for the per-task rationale. Marking a `daily`/`weekly` task complete automatically re-queues its next occurrence.
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+**Key Scheduler behaviors shown:** priority-first and chronological **sorting**, **capacity filtering** to the owner's available hours, **conflict warnings** (same-pet vs owner-time), **recurrence** (completed recurring tasks advance to their next occurrence), and **schedule generation** with contiguous, conflict-free slots.
+
+**Screenshot or video** *(optional)*: ![PawPal+ schedule view](image.png)
 
 ## Sample Output
-=======================================================
-  OWNER — create & manage preferences
-=======================================================
-Created owner: Crystal, available hours: 10
-Preferences (getPreferences): ['morning walks', 'no tasks after 8pm']
-Updated available hours (setAvailableHours): 8
-Clamped negative hours (setAvailableHours -5): 0
 
-=======================================================
-  PET — create & inspect pets
-=======================================================
-getSpecies — Luna: Dog, Mochi: Cat
+Sample CLI output from running `python main.py`:
 
-getInfo — Luna:
-Luna (Dog, 3 years old)
-Special needs: medication: allergy pill with breakfast
-Dietary: food: grain-free kibble
-
-getInfo — Mochi:
-Mochi (Cat, 5 years old)
-Special needs: diet: kidney-friendly food only
-
+```text
 =======================================================
-  TASK — create tasks, inspect properties
+  SORT — sort_by_time() by HH:MM string, then priority
 =======================================================
-  Morning Walk: priority=1, duration=60 min, recurring=True, nextOccurrence=2026-06-30 07:00
-  Feed Pets: priority=1, duration=15 min, recurring=True, nextOccurrence=2026-06-30 08:00
-  Vet Checkup: priority=2, duration=90 min, recurring=False, nextOccurrence=2026-06-29 10:00
-  Grooming Session: priority=3, duration=45 min, recurring=True, nextOccurrence=2026-06-29 14:00
-  Evening Feeding: priority=1, duration=15 min, recurring=True, nextOccurrence=2026-06-29 18:00
-  Medication Check: priority=2, duration=10 min, recurring=True, nextOccurrence=2026-06-30 09:00
-  Playtime: priority=3, duration=30 min, recurring=True, nextOccurrence=2026-06-29 15:00
-
-Marking 'Vet Checkup' complete (markComplete)...
-  isCompleted: True
-
-=======================================================
-  OWNER — addTask / getTodoList / completeTask
-=======================================================
-All tasks added. Todo list (getTodoList) — 6 pending:
-  - Morning Walk
-  - Feed Pets
-  - Grooming Session
-  - Evening Feeding
-  - Medication Check
-  - Playtime
-
-Completing 'Grooming Session' via completeTask...
-Todo list after completion — 5 remaining:
-  - Morning Walk
-  - Feed Pets
-  - Evening Feeding
-  - Medication Check
-  - Playtime
-
-=======================================================
-  SCHEDULER — load, sort, filter, generate, explain
-=======================================================
-loadTasksFromOwner: loaded 6 tasks
-addTask 'Bath Time': scheduler now has 7 tasks
-removeTask 'Bath Time': scheduler now has 6 tasks
-
-sortTasks (by priority then startHour):
-  priority=1 | 07:00 | Morning Walk
-  priority=1 | 08:00 | Feed Pets
-  priority=1 | 18:00 | Evening Feeding
-  priority=2 | 09:00 | Medication Check
-  priority=2 | 10:00 | Vet Checkup
-  priority=3 | 15:00 | Playtime
+After sort_by_time()  →  sorted(tasks, key=lambda t: (t.startTime, t.priority)):
+  [07:00] priority=1  Morning Walk           (pending)
+  [08:00] priority=1  Feed Pets              (pending)
+  [09:00] priority=2  Medication Check       (pending)
+  [10:00] priority=2  Vet Checkup            (done)
+  [14:00] priority=3  Grooming Session       (pending)
+  [15:00] priority=3  Playtime               (pending)
+  [18:00] priority=1  Evening Feeding        (pending)
 
 filterByTimeAvailable (8 hrs = 480 min):
   Morning Walk (60 min)
@@ -194,32 +165,27 @@ filterByTimeAvailable (8 hrs = 480 min):
   Evening Feeding (15 min)
   Medication Check (10 min)
   Vet Checkup (90 min)
+  Grooming Session (45 min)
   Playtime (30 min)
-
-expandRecurringTasks: returned 6 task instances
-
-generateSchedule(dayHours=12):
-ScheduledTask.getTimeSlot() for each block:
-  00:00 - 01:00 — Morning Walk for Luna
-  01:00 - 02:00 — Feed Pets for Luna
-  02:00 - 03:00 — Evening Feeding for Luna
-  03:00 - 04:00 — Medication Check for Luna
-  04:00 - 05:00 — Playtime for Luna
-
-handleConflicts applied internally — resolved schedule:
-  00:00 - 01:00 — Morning Walk
-  01:00 - 02:00 — Feed Pets
-  02:00 - 03:00 — Evening Feeding
-  03:00 - 04:00 — Medication Check
-  04:00 - 05:00 — Playtime
 
 =======================================================
   TODAY'S SCHEDULE
 =======================================================
 TIME           TASK                  PET       DURATION    PRIORITY
-───────────────────────────────────────────────────────────────────
-00:00 - 01:00  Morning Walk          Luna      60 min      High    
-01:00 - 02:00  Feed Pets             Luna      15 min      High    
-02:00 - 03:00  Evening Feeding       Luna      15 min      High    
-03:00 - 04:00  Medication Check      Luna      10 min      Medium  
-04:00 - 05:00  Playtime              Luna      30 min      Low 
+-------------------------------------------------------------------
+00:00 - 01:00  Morning Walk          Luna      60 min      High
+01:00 - 02:00  Feed Pets             Luna      15 min      High
+02:00 - 03:00  Evening Feeding       Luna      15 min      High
+03:00 - 04:00  Medication Check      Luna      10 min      Medium
+04:00 - 05:00  Grooming Session      Luna      45 min      Low
+05:00 - 06:00  Playtime              Luna      30 min      Low
+
+=======================================================
+  CONFLICT DETECTION — detectConflicts()
+=======================================================
+Tasks loaded: 4
+Conflicts found: 2
+
+  [CONFLICT — same pet — Luna] 'Morning Walk' and 'Morning Medication' overlap (07:00-08:00 vs 07:00-07:10)
+  [CONFLICT — owner time] 'Morning Walk' and 'Mochi Breakfast' overlap (07:00-08:00 vs 07:30-08:00)
+```

@@ -41,7 +41,9 @@ ScheduledTask.reasoning vs Scheduler.getReasoningFor() — Both store/return rea
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
+I asked for a more efficient way to detect and alert for scheduling conflicts. The tradeoff is: The parsed list materializes all (task, start, end) tuples upfront, so you're holding the full list in memory before any comparison happens. With the original loop, each task's to_minutes result was computed on-demand and immediately discarded.
 - Why is that tradeoff reasonable for this scenario?
+This removed a nested for loop from the previous code which was less efficient.
 
 ---
 
@@ -49,7 +51,7 @@ ScheduledTask.reasoning vs Scheduler.getReasoningFor() — Both store/return rea
 
 **a. How you used AI**
 
-- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
+- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)
 - What kinds of prompts or questions were most helpful?
 
 **b. Judgment and verification**

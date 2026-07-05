@@ -1,0 +1,43 @@
+{
+  "owner": {
+    "name": "Jordan",
+    "availableHours": 10,
+    "preferences": [
+      "moning walks only"
+    ],
+    "constraints": {},
+    "pets": [
+      {
+        "name": "Mochi",
+        "species": "cat",
+        "age": 2,
+        "specialNeeds": {
+          "medicine": "ytwice"
+        },
+        "dietary": {}
+      },
+      {
+        "name": "mochi",
+        "species": "cat",
+        "age": 0,
+        "specialNeeds": {},
+        "dietary": {}
+      }
+    ],
+    "tasks": [
+      {
+        "title": "Morning walk",
+        "durationMinutes": 25,
+        "priority": 2,
+        "description": "",
+        "isCompleted": false,
+        "recurrence": "daily",
+        "startTime": "10:50",
+        "dueDate": "2026-07-03T16:57:10.452809",
+        "appliesTo": [
+          "mochi"
+        ]
+      }
+    ]
+  }
+}

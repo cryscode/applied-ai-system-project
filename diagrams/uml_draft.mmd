@@ -1,13 +1,19 @@
 classDiagram
     class Owner {
         +string name
-        +List~string~ preferences
         +int availableHours
+        +List~string~ preferences
         +string~string~ constraints
         +List~Pet~ pets
+        +List~Task~ tasks
         +addPreference(preference: string) void
         +getPreferences() List~string~
         +setAvailableHours(hours: int) void
+        +addTask(task: Task) void
+        +completeTask(taskTitle: string) Task
+        +getTodoList() List~Task~
+        +to_dict() dict
+        +from_dict(data: dict) Owner
     }
 
     class Pet {
@@ -19,22 +25,27 @@ classDiagram
         +addSpecialNeed(need: string, detail: string) void
         +getInfo() string
         +getSpecies() string
+        +to_dict() dict
+        +from_dict(data: dict) Pet
     }
 
     class Task {
         +string title
         +int durationMinutes
-        +string priority
+        +int priority
         +string description
         +boolean isCompleted
         +string recurrence
-        +int startHour
+        +string startTime
+        +DateTime dueDate
         +List~Pet~ appliesTo
-        +markComplete() void
+        +markComplete() Task
         +getPriority() int
         +getDuration() int
         +isRecurring() boolean
         +getNextOccurrence() DateTime
+        +to_dict() dict
+        +from_dict(data: dict, pet_lookup: Dict) Task
     }
 
     class ScheduledTask {
@@ -51,17 +62,24 @@ classDiagram
         +List~Pet~ pets
         +List~Task~ tasks
         +List~ScheduledTask~ schedule
+        +loadTasksFromOwner() List~Task~
         +addTask(task: Task) void
         +removeTask(taskId: string) void
-        +generateSchedule(dayHours: int) List~ScheduledTask~
         +sortTasks() List~Task~
+        +sort_by_time() List~Task~
+        +filterTasks(completed: boolean, pet_name: string) List~Task~
         +filterByTimeAvailable() List~Task~
-        +handleConflicts() List~ScheduledTask~
         +expandRecurringTasks() List~Task~
+        +handleConflicts() List~ScheduledTask~
+        +generateSchedule(dayHours: int) List~ScheduledTask~
+        +detectConflicts() List~string~
         +explainSchedule() string
+        +save_to_json(path: string) void
+        +load_from_json(path: string) Scheduler
     }
 
     Owner "1" --> "1..*" Pet : owns
+    Owner "1" --> "0..*" Task : has
     Scheduler "1" --> "1" Owner : plans for
     Scheduler "1" --> "1..*" Pet : schedules care for
     Scheduler "1" --> "0..*" Task : manages
