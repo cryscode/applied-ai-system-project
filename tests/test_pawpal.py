@@ -489,3 +489,51 @@ class TestRemoveTask:
     def test_empty_list_does_not_raise(self, scheduler):
         scheduler.tasks = []
         scheduler.removeTask("Anything")
+
+
+# ── Structured scheduling-decision logging ────────────────────────────────────
+
+import logging
+
+
+class TestSchedulingDecisionLogging:
+    def test_proposal_logged_when_task_fits(self, scheduler, pet, caplog):
+        scheduler.tasks = [make_task("Walk", priority=1, duration=60, pets=[pet])]
+        with caplog.at_level(logging.INFO, logger="pawpal.scheduler"):
+            scheduler.generateSchedule(dayHours=8)
+
+        proposals = [r for r in caplog.records if getattr(r, "decision", None) == "PROPOSAL"]
+        assert len(proposals) == 1
+        assert proposals[0].task == "Walk"
+        assert proposals[0].startTime == 0
+        assert proposals[0].endTime == 1
+        assert proposals[0].pet == "Mochi"
+
+    def test_rejection_logged_for_task_over_owner_budget(self, scheduler, pet, caplog):
+        scheduler.owner.availableHours = 1
+        scheduler.tasks = [
+            make_task("Walk", priority=1, duration=60, pets=[pet]),
+            make_task("Overflow", priority=2, duration=120, pets=[pet]),
+        ]
+        with caplog.at_level(logging.INFO, logger="pawpal.scheduler"):
+            scheduler.filterByTimeAvailable()
+
+        rejections = [r for r in caplog.records if getattr(r, "decision", None) == "REJECTION"]
+        assert len(rejections) == 1
+        assert rejections[0].task == "Overflow"
+        assert "budget" in rejections[0].reason
+
+    def test_adjustment_logged_when_conflict_resolved(self, scheduler, pet, caplog):
+        task_a = make_task("First", priority=1, duration=90, pets=[pet])
+        task_b = make_task("Second", priority=2, duration=60, pets=[pet])
+        scheduler.schedule = [
+            ScheduledTask(task=task_a, pet=pet, startTime=0, endTime=1),
+            ScheduledTask(task=task_b, pet=pet, startTime=0, endTime=1),
+        ]
+        with caplog.at_level(logging.INFO, logger="pawpal.scheduler"):
+            scheduler.handleConflicts()
+
+        adjustments = [r for r in caplog.records if getattr(r, "decision", None) == "ADJUSTMENT"]
+        assert len(adjustments) == 1
+        assert adjustments[0].task == "Second"
+        assert "conflict" in adjustments[0].reason

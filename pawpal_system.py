@@ -4,10 +4,31 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+from pawpal_logger import ADJUSTMENT, PROPOSAL, REJECTION, get_logger, log_decision
+
+
+def parse_time_window(task: "Task") -> Tuple[int, int]:
+    """Return a task's [start, end) window in minutes since midnight."""
+    h, m = task.startTime.split(":")
+    start = int(h) * 60 + int(m)
+    return start, start + task.durationMinutes
+
+
+def intervals_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+    """Return True if [start_a, end_a) and [start_b, end_b) intersect."""
+    return start_a < end_b and start_b < end_a
+
+
+def format_minutes(minutes: int) -> str:
+    """Format a minutes-since-midnight value as an HH:MM clock string."""
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
 @dataclass
@@ -275,6 +296,7 @@ class Scheduler:
     pets: List[Pet] = field(default_factory=list)
     tasks: List[Task] = field(default_factory=list)
     schedule: List[ScheduledTask] = field(default_factory=list)
+    logger: logging.Logger = field(default_factory=get_logger, repr=False, compare=False)
 
     def loadTasksFromOwner(self) -> List[Task]:
         """Retrieve all tasks from the owner's master task list."""
@@ -349,6 +371,12 @@ class Scheduler:
             if total_duration + task.durationMinutes <= available_minutes:
                 filtered_tasks.append(task)
                 total_duration += task.durationMinutes
+            else:
+                log_decision(
+                    self.logger, REJECTION, task.title,
+                    reason=f"would exceed available hours ({format_minutes(total_duration)} used "
+                           f"of {format_minutes(available_minutes)} budget)",
+                )
 
         return filtered_tasks
 
@@ -372,8 +400,14 @@ class Scheduler:
 
         for scheduled in sorted(self.schedule, key=lambda s: s.startTime):
             if scheduled.startTime < current_hour:
+                old_start, old_end = scheduled.startTime, scheduled.endTime
                 scheduled.startTime = current_hour
                 scheduled.endTime = scheduled.startTime + (scheduled.task.durationMinutes // 60)
+                log_decision(
+                    self.logger, ADJUSTMENT, scheduled.task.title,
+                    reason=f"shifted {old_start}h-{old_end}h to {scheduled.startTime}h-{scheduled.endTime}h "
+                           "to resolve a time conflict",
+                )
 
             current_hour = scheduled.endTime
             resolved.append(scheduled)
@@ -404,7 +438,16 @@ class Scheduler:
                     reasoning=f"Scheduled based on {task.priority} priority"
                 )
                 self.schedule.append(scheduled)
+                log_decision(
+                    self.logger, PROPOSAL, task.title, reason=scheduled.reasoning,
+                    startTime=scheduled.startTime, endTime=scheduled.endTime, pet=scheduled.pet.name,
+                )
                 current_hour += duration_hours
+            else:
+                log_decision(
+                    self.logger, REJECTION, task.title,
+                    reason=f"no room left in day ({current_hour}h used of {max_hours}h max)",
+                )
 
         self.handleConflicts()
         return self.schedule
@@ -417,27 +460,17 @@ class Scheduler:
         flagged as owner-time conflicts (the owner can only do one thing at a time).
         Returns an empty list when no conflicts exist — never raises.
         """
-        from itertools import combinations
-
-        def _parse(task: Task):
-            h, m = task.startTime.split(":")
-            start = int(h) * 60 + int(m)
-            return start, start + task.durationMinutes
-
-        def fmt(minutes: int) -> str:
-            return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-        parsed = [(task, *_parse(task)) for task in self.tasks]
+        parsed = [(task, *parse_time_window(task)) for task in self.tasks]
         warnings: List[str] = []
 
         for (a, start_a, end_a), (b, start_b, end_b) in combinations(parsed, 2):
 
-            if start_a < end_b and start_b < end_a:
+            if intervals_overlap(start_a, end_a, start_b, end_b):
                 shared = {p.name for p in a.appliesTo} & {p.name for p in b.appliesTo}
                 kind = f"same pet — {', '.join(sorted(shared))}" if shared else "owner time"
                 warnings.append(
                     f"[CONFLICT — {kind}] '{a.title}' and '{b.title}' "
-                    f"overlap ({a.startTime}-{fmt(end_a)} vs {b.startTime}-{fmt(end_b)})"
+                    f"overlap ({a.startTime}-{format_minutes(end_a)} vs {b.startTime}-{format_minutes(end_b)})"
                 )
 
         return warnings
