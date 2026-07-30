@@ -5,6 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from datetime import datetime, timedelta
 from pawpal_system import Owner, Pet, Task, Scheduler, ScheduledTask
+from ai_planner import AIPlanner, PlanResult
+from validator import Validator, SafetyViolation
 
 
 def test_mark_complete_changes_status():
@@ -537,3 +539,194 @@ class TestSchedulingDecisionLogging:
         assert len(adjustments) == 1
         assert adjustments[0].task == "Second"
         assert "conflict" in adjustments[0].reason
+
+
+# ── Validator safety rules ─────────────────────────────────────────────────────
+
+class TestValidatorRejectsKnownBadCases:
+    def test_rejects_double_medication_too_close_together(self):
+        """Two medication doses for the same pet under 240 min apart must be flagged."""
+        pet = Pet("Buddy", "dog", 5)
+        dose_a = make_task("Give medication", priority=1, start_time="08:00", duration=10, pets=[pet])
+        dose_b = make_task("Give medication again", priority=1, start_time="09:00", duration=10, pets=[pet])
+        violations = Validator().validate([dose_a, dose_b])
+        assert len(violations) == 1
+        assert "medication spacing" in violations[0]
+
+    def test_accepts_medication_spaced_far_enough_apart(self):
+        """Doses at least 240 min apart for the same pet should raise no violation."""
+        pet = Pet("Buddy", "dog", 5)
+        dose_a = make_task("Give medication", priority=1, start_time="08:00", duration=10, pets=[pet])
+        dose_b = make_task("Give medication again", priority=1, start_time="12:30", duration=10, pets=[pet])
+        assert Validator().validate([dose_a, dose_b]) == []
+
+    def test_rejects_overlapping_walks_for_same_pet(self):
+        """Two walk tasks for the same pet that overlap violate the minimum rest rule."""
+        pet = Pet("Rex", "dog", 4)
+        walk_a = make_task("Morning walk", priority=1, start_time="08:00", duration=60, pets=[pet])
+        walk_b = make_task("Second walk", priority=2, start_time="08:30", duration=30, pets=[pet])
+        violations = Validator().validate([walk_a, walk_b])
+        assert len(violations) == 1
+        assert "walk rest" in violations[0]
+
+    def test_rejects_walks_with_insufficient_rest_for_senior_pet(self):
+        """Senior pets (8+ years) need 60 min rest, not the default 30 min."""
+        senior = Pet("Old Dog", "dog", 9)
+        walk_a = make_task("Morning walk", priority=1, start_time="08:00", duration=30, pets=[senior])
+        walk_b = make_task("Afternoon walk", priority=2, start_time="08:45", duration=30, pets=[senior])
+        violations = Validator().validate([walk_a, walk_b])
+        assert len(violations) == 1
+        assert "walk rest" in violations[0]
+
+    def test_accepts_walks_with_sufficient_rest(self):
+        pet = Pet("Rex", "dog", 4)
+        walk_a = make_task("Morning walk", priority=1, start_time="08:00", duration=30, pets=[pet])
+        walk_b = make_task("Afternoon walk", priority=2, start_time="09:00", duration=30, pets=[pet])
+        assert Validator().validate([walk_a, walk_b]) == []
+
+    def test_rejects_walk_assigned_to_non_walking_species(self):
+        cat = Pet("Whiskers", "cat", 3)
+        walk = make_task("Walk the cat", priority=1, start_time="08:00", duration=20, pets=[cat])
+        violations = Validator().validate([walk])
+        assert len(violations) == 1
+        assert "species mismatch" in violations[0]
+
+    def test_rejects_puppy_walk_exceeding_max_duration(self):
+        puppy = Pet("Pup", "dog", 0)
+        walk = make_task("Long walk", priority=1, start_time="08:00", duration=45, pets=[puppy])
+        violations = Validator().validate([walk])
+        assert len(violations) == 1
+        assert "puppy exertion" in violations[0]
+
+    def test_enforce_raises_safety_violation_on_bad_schedule(self):
+        cat = Pet("Whiskers", "cat", 3)
+        walk = make_task("Walk the cat", priority=1, start_time="08:00", duration=20, pets=[cat])
+        with pytest.raises(SafetyViolation):
+            Validator().enforce([walk])
+
+    def test_enforce_does_not_raise_on_clean_schedule(self):
+        pet = Pet("Rex", "dog", 4)
+        walk = make_task("Morning walk", priority=1, start_time="08:00", duration=30, pets=[pet])
+        Validator().enforce([walk])  # should not raise
+
+
+# ── AIPlanner determinism and termination ─────────────────────────────────────
+
+def build_planner(max_retries=3):
+    """Build a fresh Owner/Scheduler/AIPlanner triple with identical inputs each call.
+
+    A fresh object graph is required for determinism checks: AIPlanner.adjust()
+    mutates scheduler.tasks in place, so reusing one instance across two run()
+    calls would compare a mutated state against itself instead of two
+    independent runs of the same input.
+    """
+    pet = Pet("Buddy", "dog", 5)
+    owner = Owner(name="Sam", availableHours=8)
+    owner.pets = [pet]
+    owner.addTask(make_task("Walk", priority=1, start_time="08:00", duration=30, pets=[pet]))
+    owner.addTask(make_task("Feed", priority=2, start_time="09:00", duration=15, pets=[pet]))
+    owner.addTask(make_task("Give medication", priority=1, start_time="10:00", duration=10, pets=[pet]))
+    scheduler = Scheduler(owner=owner, pets=[pet], tasks=list(owner.tasks))
+    return AIPlanner(scheduler=scheduler, max_retries=max_retries)
+
+
+class TestAIPlannerDeterminism:
+    def test_same_input_produces_same_plan_output(self):
+        """AIPlanner.plan() must return the same target hours for identical input."""
+        planner_a = build_planner()
+        planner_b = build_planner()
+        assert planner_a.plan() == planner_b.plan()
+
+    def test_same_input_produces_same_run_result(self):
+        """Two independent planners built from identical input must reach the same result."""
+        result_a = build_planner().run()
+        result_b = build_planner().run()
+
+        assert result_a.accepted == result_b.accepted
+        assert result_a.iterations == result_b.iterations
+        assert result_a.removed_tasks == result_b.removed_tasks
+        assert result_a.violations_history == result_b.violations_history
+        assert [s.task.title for s in result_a.schedule] == [s.task.title for s in result_b.schedule]
+        assert [(s.startTime, s.endTime) for s in result_a.schedule] == [
+            (s.startTime, s.endTime) for s in result_b.schedule
+        ]
+
+    def test_repeated_runs_on_same_planner_are_idempotent_once_accepted(self):
+        """Re-running an already-accepted planner should keep returning the same schedule."""
+        planner = build_planner()
+        first = planner.run()
+        second = planner.run()
+        assert first.accepted is True
+        assert [s.task.title for s in first.schedule] == [s.task.title for s in second.schedule]
+
+
+class TestAIPlannerAdjustLoopTermination:
+    @pytest.mark.parametrize("max_retries", [1, 2, 3, 5])
+    def test_run_never_exceeds_max_retries_iterations(self, max_retries):
+        """No matter how many unresolved violations exist, run() must stop within max_retries.
+
+        Each violating iteration's adjust() can remove more than one task (every
+        distinct victim across all violations found that pass), so the loop may
+        converge in fewer iterations than max_retries -- the property under test
+        is only the upper bound, not a specific iteration count or outcome.
+        """
+        pet = Pet("Buddy", "dog", 5)
+        owner = Owner(name="Sam", availableHours=8)
+        owner.pets = [pet]
+        # Five medications for the same pet, all mutually too close together --
+        # the validator will keep finding pairwise violations every iteration.
+        for i in range(5):
+            owner.addTask(
+                make_task(f"Medication {i}", priority=1, start_time=f"08:{i:02d}", duration=5, pets=[pet])
+            )
+        scheduler = Scheduler(owner=owner, pets=[pet], tasks=list(owner.tasks))
+        planner = AIPlanner(scheduler=scheduler, max_retries=max_retries)
+
+        result = planner.run()
+
+        assert result.iterations <= max_retries
+        if not result.accepted:
+            assert result.schedule == []
+
+    def test_single_retry_budget_rejects_unresolved_conflicts(self):
+        """With max_retries=1, the loop gets exactly one adjust pass and must reject."""
+        pet = Pet("Buddy", "dog", 5)
+        owner = Owner(name="Sam", availableHours=8)
+        owner.pets = [pet]
+        for i in range(5):
+            owner.addTask(
+                make_task(f"Medication {i}", priority=1, start_time=f"08:{i:02d}", duration=5, pets=[pet])
+            )
+        scheduler = Scheduler(owner=owner, pets=[pet], tasks=list(owner.tasks))
+        planner = AIPlanner(scheduler=scheduler, max_retries=1)
+
+        result = planner.run()
+
+        assert result.iterations == 1
+        assert result.accepted is False
+        assert result.schedule == []
+
+    def test_adjust_loop_terminates_by_resolving_all_violations(self):
+        """When violations can be resolved, run() must terminate with accepted=True."""
+        planner = build_planner(max_retries=3)
+        result = planner.run()
+        assert result.accepted is True
+        assert result.iterations <= 3
+
+    def test_adjust_removes_at_least_one_task_per_violating_iteration(self):
+        """Every iteration that finds violations must shrink the task pool by >=1."""
+        pet = Pet("Buddy", "dog", 5)
+        owner = Owner(name="Sam", availableHours=8)
+        owner.pets = [pet]
+        for i in range(4):
+            owner.addTask(
+                make_task(f"Medication {i}", priority=1, start_time=f"08:{i:02d}", duration=5, pets=[pet])
+            )
+        scheduler = Scheduler(owner=owner, pets=[pet], tasks=list(owner.tasks))
+        planner = AIPlanner(scheduler=scheduler, max_retries=10)
+
+        initial_count = len(scheduler.tasks)
+        result = planner.run()
+
+        assert len(result.removed_tasks) >= 1
+        assert len(result.removed_tasks) <= initial_count
