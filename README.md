@@ -1,191 +1,123 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ — AI-Assisted Pet Care Scheduler
 
-You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.
+**Original project (Modules 1–3):** *PawPal+*, a Streamlit app that helps a pet owner plan daily pet-care tasks (walks, feeding, medication, grooming, etc.). The original goal was to design the domain model in UML, implement priority- and time-aware scheduling logic in Python (sorting, capacity filtering, conflict detection/resolution, recurrence), and expose it through a simple UI backed by JSON persistence — with a pytest suite covering the core scheduling behaviors.
 
-## Scenario
+This repository is the **Module 4 extension** of that project: it keeps the original deterministic scheduler intact and adds an AI/agent layer on top of it.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+## Title and Summary
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Consider constraints (time available, priority, owner preferences)
-- Produce a daily plan and explain why it chose that plan
+**PawPal+ with a Safety-Gated Scheduling Agent and LLM Assistant.**
 
-Your job is to design the system first (UML), then implement the logic in Python, then connect it to the Streamlit UI.
+This project turns the original rule-based scheduler into a small AI system: a rule-based *agent* (`AIPlanner`) that iteratively generates and repairs a daily pet-care schedule, a *safety validator* that acts as a hard gate no unsafe schedule can pass, an optional *Gemini-backed assistant* for natural-language Q&A and schedule edits, and a lightweight *retrieval* module for grounded pet-care advice. It matters because pet-care scheduling has real consequences — a missed medication window or an over-walked puppy is not just a UX bug — so the interesting engineering problem isn't "call an LLM," it's "how do you let an autonomous loop and an LLM propose changes to a schedule without ever letting either one commit something unsafe."
 
-## What you will build
+## Architecture Overview
 
-Your final app should:
+The full system diagram lives in [`diagrams/system_diagram.mmd`](diagrams/system_diagram.mmd). In short:
 
-- Let a user enter basic owner + pet info
-- Let a user add/edit tasks (duration + priority at minimum)
-- Generate a daily schedule/plan based on constraints and priorities
-- Display the plan clearly (and ideally explain the reasoning)
-- Include tests for the most important scheduling behaviors
+- **UI (`app.py`)** is the only entry point a human touches. It collects owner/pet/task input and renders schedules and answers.
+- **Deterministic core (`pawpal_system.py`)** holds `Owner`, `Pet`, `Task`, and `Scheduler` — the same sorting/filtering/conflict logic from Modules 1–3, plus JSON persistence (`data.json`).
+- **Agent (`ai_planner.py`)** wraps the Scheduler in a bounded **Plan → Act → Check → Adjust → Final** loop: it generates a candidate schedule, checks it against the Validator, removes the offending task(s) if it fails, and retries up to `max_retries` times.
+- **Safety gate (`validator.py`)** is a pure rule-based module (medication spacing, walk-rest minimums, species/age checks) with no LLM and no I/O. It is the one trust boundary in the system: **both** the agent and the LLM assistant can only commit a schedule change after `Validator.enforce()` has confirmed it clean — there is no code path that skips this.
+- **LLM assistant (`llm_assistant.py` + `gemini_client.py`)** is the only non-deterministic part of the system. It handles free-text Q&A and natural-language edit requests ("move Luna's walk to 8am"), turns them into a structured proposed edit via Gemini, and then routes that edit through the *same* Validator before it's ever applied.
+- **Retriever (`retriever.py`)** answers general advisory questions from a small static, keyword-scored knowledge base — no embeddings, no network calls, fully deterministic and auditable.
+- **Logging (`pawpal_logger.py`)** records every proposal, rejection, and adjustment from the Scheduler, AIPlanner, LLMAssistant, and Retriever into one structured decision stream.
+- **Testing (`tests/`, `eval_system.py`)** verifies this from two angles: pytest unit/integration tests assert component-level contracts, and `eval_system.py` runs fixed end-to-end scenarios and checks the outcome against an expectation, closer to how a human would sanity-check the system.
 
-## Getting started
+The key architectural decision the diagram is meant to convey: **the Validator sits between every AI-generated proposal (agent or LLM) and anything that actually gets committed or shown as final.** Nothing bypasses it.
 
-### Setup
+## Setup Instructions
 
 ```bash
+# 1. Clone and enter the project
+git clone <this-repo-url>
+cd applied-ai-system-final
+
+# 2. Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
+
+# 4. Configure the Gemini API key (only needed for the LLM assistant features)
+cp .env.example .env
+# then edit .env and set GEMINI_API_KEY=<your key>
+# GEMINI_MODEL defaults to gemini-2.5-flash
+
+# 5. Run the app
+streamlit run app.py
 ```
 
-### Suggested workflow
+Everything except the LLM Q&A/edit features (scheduling, validation, retrieval, persistence) works with **no API key at all**.
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
-
-## ✨ Features
-
-PawPal+ is built around a small set of scheduling algorithms that turn a raw
-list of pet-care tasks into an ordered, conflict-aware daily plan.
-
-- **Priority-first sorting** — `sortTasks()` orders tasks by priority
-  (1 = high → 3 = low), breaking ties by start time and then by longer duration
-  first, so the most urgent work always rises to the top.
-- **Chronological sorting** — `sort_by_time()` re-orders tasks by their `HH:MM`
-  start time (then priority). Because times are zero-padded, a plain string
-  compare gives correct chronological order with no datetime parsing.
-- **Capacity-aware filtering** — `filterByTimeAvailable()` walks tasks in
-  priority order and greedily keeps only what fits inside the owner's available
-  hours, dropping the rest once the daily time budget is spent.
-- **Conflict warnings** — `detectConflicts()` compares every pair of task time
-  windows and flags overlaps. Overlaps on the *same pet* are labelled as pet
-  conflicts; overlaps across *different pets* are flagged as owner-time
-  conflicts (the owner can only be in one place at once).
-- **Conflict resolution** — `handleConflicts()` pushes overlapping blocks
-  forward so the generated schedule stays contiguous and non-overlapping.
-- **Daily / weekly / monthly recurrence** — `Task.isRecurring()`,
-  `getNextOccurrence()`, and `markComplete()` compute the next occurrence of a
-  recurring task. Completing a daily task returns a fresh copy due one day
-  later; weekly advances a week; one-off tasks return `None`.
-- **Automatic re-queue** — `Owner.completeTask()` removes a finished task and,
-  if it recurs, drops its next occurrence back onto the to-do list so the plan
-  never runs dry.
-- **Schedule generation** — `generateSchedule(dayHours)` combines filtering,
-  slot-packing, and conflict resolution in one call, and `explainSchedule()`
-  returns a human-readable rationale for each scheduled block.
-- **Task filtering** — `filterTasks(completed, pet_name)` narrows the list by
-  completion status, by pet, or both.
-- **Persistence** — `save_to_json()` / `load_from_json()` store the owner,
-  pets, and tasks to disk so the app restores state across runs.
-
-## 🧪 Testing PawPal+
-
-Run the full test suite from the project root:
+To run the tests and the scenario evaluation harness instead of the UI:
 
 ```bash
-python -m pytest tests/test_pawpal.py -v
+python -m pytest tests/ -v          # 111 tests
+python eval_system.py               # 8 end-to-end scenarios, no API key required
+python main.py                      # CLI walkthrough of the original scheduler
 ```
 
-All 59 tests are in `tests/test_pawpal.py` and cover the following behaviors:
+## Sample Interactions
 
-| Area | What is tested |
+**1. The agent auto-repairs an unsafe schedule (no human or LLM involved).**
+Two insulin doses were scheduled 30 minutes apart for the same pet — the agent detects the violation, drops the lower-priority dose, and retries automatically:
+
+```
+[PROPOSAL] Insulin dose A -- Scheduled based on 2 priority
+[PROPOSAL] Insulin dose B -- Scheduled based on 3 priority
+[ADJUSTMENT] Insulin dose B -- removed by planner to resolve:
+  [SAFETY — medication spacing] 'Insulin dose A' (08:00) and 'Insulin dose B' (08:30)
+  for Milo are too close together — doses need at least 240 min apart
+```
+`AIPlanner.run()` returns `accepted=True` on the next iteration with `Insulin dose B` removed and `removed_tasks == ["Insulin dose B"]`.
+
+**2. The agent honestly rejects an unfixable conflict rather than guessing.**
+Two identically-titled, identically-prioritized medication doses 5 minutes apart give the adjust step no safe single task to remove:
+
+```
+[ADJUSTMENT] Dose -- removed by planner to resolve: [SAFETY — medication spacing] ...
+[REJECTION] 10h schedule -- no safe arrangement found after 1 iteration(s);
+  last violations: ["[SAFETY — medication spacing] 'Dose' (08:00) and 'Dose' (08:05) ..."]
+```
+`PlanResult.accepted` is `False` and `PlanResult.schedule` is empty — the planner never returns a half-safe guess.
+
+**3. Retriever answers grounded pet-care questions and declines out-of-scope ones.**
+
+| Input | Output |
 |---|---|
-| **Sorting** (`sortTasks`, `sort_by_time`) | High-priority tasks come before low-priority; ties broken by start time then duration; neither method mutates the original list |
-| **Recurrence** (`Task.markComplete`) | Daily tasks produce a next occurrence due exactly one day later; weekly tasks advance by one week; `once` tasks return `None`; the returned task has `isCompleted=False`; casing variants like `"DAILY"` are handled |
-| **Conflict detection** (`detectConflicts`) | Exact and partial overlaps are flagged; same-pet conflicts name the pet; different-pet overlaps are labelled as owner-time conflicts; adjacent (non-overlapping) tasks are not flagged |
-| **Owner task management** (`completeTask`, `getTodoList`) | Completing a once task removes it; completing a daily task replaces it with the next occurrence; unknown titles return `None` safely; `getTodoList` excludes completed tasks |
-| **Schedule generation** (`generateSchedule`) | Tasks appear in sequence; a 30-minute task occupies a 1-hour slot (due to `max(1, duration//60)` rounding); completed tasks are skipped; schedule is capped at `min(dayHours, owner.availableHours)` |
-| **Capacity filtering** (`filterByTimeAvailable`) | Tasks too long to fit alone are dropped; high-priority tasks are kept when capacity runs out; zero available hours returns an empty list |
-| **Task filtering** (`filterTasks`) | Filter by completion status, by pet name, or both combined; no filters returns all tasks |
-| **Task removal** (`removeTask`) | Removes only the matching task; other tasks are unchanged; nonexistent titles and empty lists do not raise |
+| `"how often should I walk a labrador puppy"` | Matches the `dog/labrador/walking` knowledge entry: *"A Labrador puppy (under 1 year old) should get short, frequent walks — roughly 5 minutes per month of age, up to 3–4 times a day..."* |
+| `"how often should I walk my cat"` | Matches the `cat/exercise` entry and steers the user correctly: *"Cats aren't typically walked like dogs — they get exercise through active play..."* |
+| `"what are the tax filing deadlines this year"` | No knowledge-base entry scores above threshold → Retriever explicitly declines rather than fabricating an answer, logged as `[ADVISORY] ... -- no matching knowledge base entry found`. |
 
-Sample test output:
+**4. LLM assistant proposes an edit, which still goes through the Validator before committing.**
+Given the prompt *"move Luna's walk to 8am"*, Gemini is asked to return structured JSON (not free text):
 
+```json
+{"action": "edit", "target_title": "Morning walk", "startTime": "08:00",
+ "explanation": "Move the walk earlier."}
 ```
-========================================= test session starts ==========================================
-platform win32 -- Python 3.14.3, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\Users\adike\Documents\CODEPATH\ai110-module2show-pawpal-starter
-plugins: anyio-4.14.1
-collected 59 items                                                                                      
+`LLMAssistant.propose_edit()` parses this into a `ProposedEdit`, resolves `"Morning walk"` against the owner's actual task list (raising `ProposalError` if the title or a referenced pet doesn't exist), and — like every other write path in the system — the resulting task list is checked against `Validator` before it is ever applied.
 
-tests\test_pawpal.py ...........................................................                  [100%]
+## Design Decisions
 
-========================================== 59 passed in 0.61s ==========================================
-```
+- **One trust boundary, not two.** Both the rule-based agent and the LLM assistant funnel every change through the same `Validator.enforce()` call rather than each having their own safety logic. This was a deliberate trade-off: it means the Validator's rules have to be generic enough to apply to both a scheduler-generated candidate and an LLM-proposed edit, but it guarantees there's exactly one place to audit or extend safety behavior, instead of two that could drift out of sync.
+- **The agent is rule-based, not LLM-based.** `AIPlanner` is explicitly "Plan → Act → Check → Adjust → Final" with no model call anywhere in it. This was chosen so the core scheduling-repair loop stays deterministic, fast, and fully unit-testable (same input → same output, every time) — the LLM is reserved for the parts that actually need natural language (Q&A, free-text edit requests), not for logic that a plain algorithm handles better and more auditably.
+- **`validate()` vs `enforce()` as two separate methods.** `validate()` returns violations without raising, so the planner's loop can inspect them and decide what to remove; `enforce()` raises and is used at the final commit point. Splitting these means "inspect" and "block" are never accidentally conflated — a caller can't forget to check the return value of `enforce()`, because a caller who wants to block just calls it and lets it raise.
+- **Retriever is intentionally dumb.** Plain keyword-overlap scoring over a small static `KnowledgeEntry` list, no embeddings, no external calls. For a bounded pet-care advisory domain this is fully deterministic and auditable, at the cost of not handling paraphrased queries as gracefully as a real embedding-based retriever would. That trade-off is acceptable here because the knowledge base is small and hand-curated, not open-domain.
+- **The LLM never talks directly to state.** `LLMAssistant` only ever produces a `ProposedEdit` (or an answer string for Q&A). It never mutates `Owner`/`Scheduler` itself — the calling code (or the same Validator-gated commit path the planner uses) does that. This keeps the one non-deterministic component of the system read-only with respect to actually changing data; it can suggest, but only the deterministic, tested code path commits.
+- **`eval_system.py` alongside pytest, not instead of it.** pytest checks component contracts in isolation (e.g., "does `_check_medication_spacing` flag this exact overlap"); `eval_system.py` checks end-to-end scenarios the way a person would ("given this whole pet+task setup, does the planner produce something safe or honestly refuse"). Keeping both was worth the duplication because they catch different classes of regressions — a passing unit test suite does not guarantee the pieces compose correctly.
 
-Confidence Level
-⭐⭐⭐⭐(4/5)
+## Testing Summary
 
-## 📐 Smarter Scheduling
+- **111 pytest tests pass** across `test_pawpal.py` (original scheduler behaviors), `test_gemini_client.py`, `test_llm_assistant.py`, and `test_retriever.py` (new AI-layer components, all tested against a hand-written fake `LLMClient` so no test requires network access or an API key).
+- **`eval_system.py` end-to-end scenarios: 8/8 pass, average confidence 1.00**, covering: a clean schedule being accepted as-is, medication-spacing/puppy-exertion/species-mismatch violations each being auto-resolved by the planner, an unfixable conflict being honestly rejected instead of guessed around, a grounded advisory answer, a correctly-redirected advisory answer, and an out-of-scope question being correctly declined.
+- **What worked well:** the Validator-as-single-gate design meant that once the medication/walk-rest/species rules were correct, both the planner and the LLM assistant path "just worked" against them with no separate safety logic to write or test twice. The `adjust()` step's approach of parsing violation messages back into task titles via regex (`re.findall(r"'([^']+)'", line)`) turned out to be a clean way to keep violation text human-readable *and* machine-actionable without a second parallel data structure.
+- **What didn't work initially / had to change:** early versions of `adjust()` risked infinite loops if a violation referenced a task no longer in the pool — this is why `run()` explicitly breaks out when `adjust()` removes nothing, and why the loop's termination is provable (bounded by `min(max_retries, len(initial tasks) + 1)`) rather than just "hopefully converges." The medication-spacing rule also had to be written to compare every pair via `itertools.combinations` (not just adjacent pairs), because two doses could be non-adjacent in time but still within the spacing window once a third dose is inserted between them.
+- **What I learned:** testing an agent loop is different from testing a pure function — it's not enough to check the final output, you also have to check that it terminates, that it terminates in a *bounded* number of steps, and that every intermediate state it produces along the way was itself safe (not just the final one). The `PlanResult.violations_history` field exists specifically so tests (and humans) can inspect that trace rather than trusting the final `accepted` flag alone.
 
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | `Scheduler.sortTasks()`, `Scheduler.sort_by_time()` | `sortTasks()` orders by priority then start time; `sort_by_time()` orders chronologically then priority |
-| Filtering | `Scheduler.filterTasks(completed, pet_name)` | Filters by completion status, by pet, or both; either argument is optional |
-| Skip tasks if time runs out | `Scheduler.filterByTimeAvailable()` | Greedy priority-order walk; drops tasks once the owner's available hours are exhausted |
-| Conflict detection | `Scheduler.detectConflicts()` | Flags overlapping task pairs as "same pet" or "owner time" conflicts; returns warning strings |
-| Conflict resolution | `Scheduler.handleConflicts()` | Pushes overlapping blocks forward so the schedule stays contiguous; called automatically by `generateSchedule()` |
-| Recurring tasks | `Task.isRecurring()`, `Task.getNextOccurrence()`, `Task.markComplete()` | `isRecurring()` checks cadence; `getNextOccurrence()` computes the next datetime (daily/weekly/monthly); `markComplete()` returns a fresh copy advanced by one period |
-| Recurring auto-requeue | `Owner.completeTask(taskTitle)` | Removes the completed task and re-adds the next occurrence so the to-do list stays stocked |
-| Schedule generation | `Scheduler.generateSchedule(dayHours)` | Combines filtering, slot-packing, and conflict resolution into one call |
+## Reflection
 
-## 📸 Demo Walkthrough
+Building the agent/validator split clarified something that wasn't obvious from Modules 1–3 alone: making a system "smarter" (an iterative loop, an LLM) doesn't remove the need for a dumb, deterministic, fully-auditable core — it *increases* it. The more autonomous or generative a component gets, the more valuable it is to have a small, boring, rule-based gate that everything must pass through, precisely because that's the one piece a human can read top-to-bottom and be confident about. Problem-solving with AI, in this project, turned out to mean less "how do I get the model to do the right thing" and more "how do I design the system so it doesn't matter whether the model does the right thing" — the agent's Adjust step and the Validator's `enforce()` gate both exist to make correctness a property of the architecture, not of any one component's judgment.
 
-Describe your app in numbered steps so a reader can follow along without watching a video:
-
-1. **Set up the owner** — enter the owner's name (**Crystal**) and *available hours today* (**8**), then save. This is the daily time budget the scheduler packs against. Add any preferences (e.g. "morning walks only").
-2. **Add a pet** — add **Luna** (Dog, 3 yrs). Pet names must be unique because they are the persistence key. Record a special need for the active pet (`medication: allergy pill with breakfast`).
-3. **Schedule tasks** — add tasks with a title, duration, priority, recurrence (`once` / `daily` / `weekly`), start time, and the pet(s) they apply to: a `daily` **Morning Walk** at 07:00 (60 min, high), a `daily` **Medication Check** at 09:00 (10 min, medium), and a `weekly` **Grooming Session** at 14:00 (45 min, low). Tasks get an inferred type emoji (🚶 walk, 🍽️ feeding, 💊 meds…) and a color-coded priority badge (🔴/🟡/🟢).
-4. **Sort, filter & spot conflicts** — sort the task list by **priority** or **start time** and filter it by pet. A live banner warns about overlapping time windows: same-pet overlaps vs owner-time overlaps.
-5. **Build & view today's schedule** — click **Generate schedule** to pack tasks into slots (capacity filtering + conflict resolution) and view the plan as a table. Open **See reasoning** for the per-task rationale. Marking a `daily`/`weekly` task complete automatically re-queues its next occurrence.
-
-**Key Scheduler behaviors shown:** priority-first and chronological **sorting**, **capacity filtering** to the owner's available hours, **conflict warnings** (same-pet vs owner-time), **recurrence** (completed recurring tasks advance to their next occurrence), and **schedule generation** with contiguous, conflict-free slots.
-
-**Screenshot or video** *(optional)*: ![PawPal+ schedule view](image.png)
-
-## Sample Output
-
-Sample CLI output from running `python main.py`:
-
-```text
-=======================================================
-  SORT — sort_by_time() by HH:MM string, then priority
-=======================================================
-After sort_by_time()  →  sorted(tasks, key=lambda t: (t.startTime, t.priority)):
-  [07:00] priority=1  Morning Walk           (pending)
-  [08:00] priority=1  Feed Pets              (pending)
-  [09:00] priority=2  Medication Check       (pending)
-  [10:00] priority=2  Vet Checkup            (done)
-  [14:00] priority=3  Grooming Session       (pending)
-  [15:00] priority=3  Playtime               (pending)
-  [18:00] priority=1  Evening Feeding        (pending)
-
-filterByTimeAvailable (8 hrs = 480 min):
-  Morning Walk (60 min)
-  Feed Pets (15 min)
-  Evening Feeding (15 min)
-  Medication Check (10 min)
-  Vet Checkup (90 min)
-  Grooming Session (45 min)
-  Playtime (30 min)
-
-=======================================================
-  TODAY'S SCHEDULE
-=======================================================
-TIME           TASK                  PET       DURATION    PRIORITY
--------------------------------------------------------------------
-00:00 - 01:00  Morning Walk          Luna      60 min      High
-01:00 - 02:00  Feed Pets             Luna      15 min      High
-02:00 - 03:00  Evening Feeding       Luna      15 min      High
-03:00 - 04:00  Medication Check      Luna      10 min      Medium
-04:00 - 05:00  Grooming Session      Luna      45 min      Low
-05:00 - 06:00  Playtime              Luna      30 min      Low
-
-=======================================================
-  CONFLICT DETECTION — detectConflicts()
-=======================================================
-Tasks loaded: 4
-Conflicts found: 2
-
-  [CONFLICT — same pet — Luna] 'Morning Walk' and 'Morning Medication' overlap (07:00-08:00 vs 07:00-07:10)
-  [CONFLICT — owner time] 'Morning Walk' and 'Mochi Breakfast' overlap (07:00-08:00 vs 07:30-08:00)
-```
+For the graded responsible-AI reflection — how I collaborated with AI on this project, one helpful and one flawed AI suggestion, and this system's limitations — see [`model_card.md`](model_card.md).
