@@ -1,5 +1,14 @@
 import streamlit as st
+from dotenv import load_dotenv
+
 from pawpal_system import Owner, Task, Pet, Scheduler
+from retriever import Retriever
+from llm_assistant import LLMAssistant, ProposalError
+from gemini_client import GeminiClient, GeminiError, GeminiMalformedResponseError
+from validator import SafetyViolation
+from pawpal_logger import LLM_ERROR, get_logger, log_decision
+
+load_dotenv()
 
 DATA_FILE = "data.json"
 
@@ -25,7 +34,11 @@ if "scheduler" not in st.session_state:
     scheduler.pets = scheduler.owner.pets
     st.session_state.scheduler = scheduler
 
+if "retriever" not in st.session_state:
+    st.session_state.retriever = Retriever()
+
 scheduler = st.session_state.scheduler
+retriever = st.session_state.retriever
 owner = scheduler.owner
 
 PRIORITY_MAP = {"high": 1, "medium": 2, "low": 3}
@@ -337,3 +350,113 @@ if st.button("Generate schedule"):
                 "⚠️ No tasks fit into the available hours. "
                 "Try increasing available hours or shortening task durations."
             )
+
+st.divider()
+
+# ── Ask PawPal (Q&A + natural-language schedule editing) ──────────────────────
+st.subheader("Ask PawPal")
+
+if "llm_assistant" not in st.session_state:
+    st.session_state.llm_assistant = None
+    st.session_state.llm_init_error = None
+    try:
+        st.session_state.llm_assistant = LLMAssistant(
+            scheduler=scheduler, retriever=retriever, client=GeminiClient(),
+        )
+    except GeminiError as e:
+        st.session_state.llm_init_error = str(e)
+
+if "pending_edit" not in st.session_state:
+    st.session_state.pending_edit = None
+    st.session_state.pending_edit_violations = []
+
+llm_assistant = st.session_state.llm_assistant
+
+qa_tab, edit_tab = st.tabs(["❓ Ask a question", "✏️ Edit schedule (natural language)"])
+
+with qa_tab:
+    st.caption("Answers are grounded on care facts and your own pets/schedule (read-only).")
+    question = st.text_input(
+        "Ask a care question (e.g. 'how often should I walk a labrador puppy')", value="", key="qa_question"
+    )
+    if st.button("Ask", key="qa_ask_btn"):
+        if not question.strip():
+            st.error("❌ Enter a question first.")
+        elif llm_assistant is None:
+            st.warning(f"⚠️ Gemini unavailable ({st.session_state.llm_init_error}) — showing basic advisory answer.")
+            st.info(retriever.answer(question, species=active_pet.species))
+        else:
+            try:
+                st.info(llm_assistant.answer_question(question, active_pet.species))
+            except GeminiError as e:
+                log_decision(get_logger(), LLM_ERROR, question, reason=str(e))
+                st.error("⚠️ Gemini is unavailable right now. Here's a basic advisory answer instead:")
+                st.info(retriever.answer(question, species=active_pet.species))
+
+with edit_tab:
+    st.caption("Proposed changes are shown for your approval before anything is saved.")
+    if llm_assistant is None:
+        st.warning(f"⚠️ Natural-language editing needs Gemini configured: {st.session_state.llm_init_error}")
+    else:
+        instruction = st.text_input(
+            "What would you like to change?", placeholder="e.g. move Luna's walk to 8am", key="edit_instruction"
+        )
+        if st.button("Propose change"):
+            if not instruction.strip():
+                st.error("❌ Enter an instruction first.")
+            else:
+                try:
+                    proposed = llm_assistant.propose_edit(instruction)
+                    violations = llm_assistant.check_edit(proposed)
+                    st.session_state.pending_edit = proposed
+                    st.session_state.pending_edit_violations = violations
+                except ProposalError as e:
+                    st.error(f"❌ {e}")
+                    st.session_state.pending_edit = None
+                except GeminiMalformedResponseError:
+                    st.error("❌ I couldn't understand how to structure that — try rephrasing.")
+                    st.session_state.pending_edit = None
+                except GeminiError as e:
+                    log_decision(get_logger(), LLM_ERROR, instruction, reason=str(e))
+                    st.error("⚠️ Gemini is unavailable right now. Try again shortly.")
+                    st.session_state.pending_edit = None
+
+        pending = st.session_state.pending_edit
+        if pending is not None:
+            st.info(f"**Proposed:** {pending.explanation}")
+            if pending.action == "remove":
+                st.write(f"Remove task: **{pending.target_title}**")
+            else:
+                t = pending.task
+                st.table([{
+                    "action": pending.action,
+                    "title": t.title,
+                    "start": t.startTime,
+                    "duration": f"{t.durationMinutes} min",
+                    "priority": PRIORITY_LABEL.get(t.priority, t.priority),
+                    "pets": ", ".join(p.name for p in t.appliesTo) or "—",
+                }])
+
+            if st.session_state.pending_edit_violations:
+                st.error("This change was blocked by safety rules:")
+                for v in st.session_state.pending_edit_violations:
+                    st.error(v)
+                if st.button("Discard", key="discard_blocked"):
+                    st.session_state.pending_edit = None
+            else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ Apply"):
+                        try:
+                            llm_assistant.commit_edit(pending)
+                            save()
+                            st.session_state.pending_edit = None
+                            st.success("✅ Applied.")
+                        except SafetyViolation as e:
+                            st.error("❌ Blocked at the last check (schedule changed since proposing):")
+                            for v in e.violations:
+                                st.error(v)
+                            st.session_state.pending_edit = None
+                with c2:
+                    if st.button("Discard", key="discard_ok"):
+                        st.session_state.pending_edit = None
