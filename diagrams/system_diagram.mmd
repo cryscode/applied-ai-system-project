@@ -1,0 +1,88 @@
+%% PawPal+ system diagram
+%% Components, data flow, and where humans/tests check AI output.
+
+flowchart TD
+
+    User(["👤 Owner (human user)"])
+
+    subgraph UI["User Interface"]
+        App["app.py<br/>Streamlit UI"]
+    end
+
+    subgraph Core["Deterministic Core (pawpal_system.py)"]
+        Sched["Scheduler / Owner / Pet / Task"]
+    end
+
+    subgraph Agent["Rule-Based Agent"]
+        Planner["ai_planner.py<br/>AIPlanner<br/>(Plan → Act → Check → Adjust → Final)"]
+    end
+
+    subgraph LLM["LLM-Backed Assistant"]
+        Assistant["llm_assistant.py<br/>LLMAssistant<br/>(Q&A + NL schedule edits)"]
+        Gemini["gemini_client.py<br/>GeminiClient<br/>(Gemini API wrapper)"]
+    end
+
+    subgraph RAG["Retrieval"]
+        Retriever["retriever.py<br/>Retriever<br/>(keyword-scored KB lookup)"]
+    end
+
+    subgraph Safety["Safety Gate"]
+        Validator["validator.py<br/>Validator<br/>(rule-based safety checks)"]
+    end
+
+    subgraph Persist["Persistence"]
+        DataFile[("data.json")]
+    end
+
+    subgraph Observability["Logging"]
+        Logger["pawpal_logger.py<br/>structured decision log"]
+    end
+
+    subgraph Testing["Automated Testing / Eval"]
+        Tests["tests/*.py<br/>pytest suite"]
+        Eval["eval_system.py<br/>scenario eval harness"]
+    end
+
+    %% ── Primary input/output flow ──────────────────────────────
+    User -- "form input\n(pets, tasks, questions)" --> App
+    App -- "rendered schedule / answers" --> User
+
+    App -- "generate schedule" --> Planner
+    Planner -- "candidate schedule" --> Sched
+    Planner -- "validate()/enforce()" --> Validator
+    Validator -- "pass / violations" --> Planner
+    Planner -- "accepted schedule only" --> App
+
+    App -- "NL question / edit request" --> Assistant
+    Assistant -- "prompt" --> Gemini
+    Gemini -- "raw text/JSON" --> Assistant
+    Assistant -- "advisory question" --> Retriever
+    Retriever -- "matched KB fact" --> Assistant
+    Assistant -- "hypothetical task edit" --> Validator
+    Validator -- "pass / violations" --> Assistant
+    Assistant -- "committed edit or explanation" --> App
+
+    Sched <-- "load/save" --> DataFile
+
+    Planner -. "decision events" .-> Logger
+    Assistant -. "decision events" .-> Logger
+    Sched -. "decision events" .-> Logger
+    Retriever -. "decision events" .-> Logger
+
+    %% ── Where AI output is checked ─────────────────────────────
+    Validator == "blocks unsafe schedules\nbefore they ever reach the user" ==> App
+    Tests -. "asserts Validator/AIPlanner\nbehavior offline" .-> Validator
+    Tests -. "asserts Validator/AIPlanner\nbehavior offline" .-> Planner
+    Eval -. "runs fixed scenarios,\nchecks pass/fail vs. expected" .-> Planner
+    Eval -. "runs fixed scenarios,\nchecks pass/fail vs. expected" .-> Retriever
+    User -. "reviews schedule/answers\nin the UI before acting on them" .-> App
+
+    classDef human fill:#fef3c7,stroke:#b45309,color:#000
+    classDef gate fill:#fee2e2,stroke:#b91c1c,color:#000
+    classDef test fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef llm fill:#ede9fe,stroke:#6d28d9,color:#000
+
+    class User human
+    class Validator gate
+    class Tests,Eval test
+    class Assistant,Gemini llm
