@@ -53,10 +53,22 @@ available_hours = st.number_input(
 )
 
 if st.button("Save owner"):
-    owner.name = owner_name.strip() or owner.name
-    owner.setAvailableHours(int(available_hours))
-    save()
-    st.success(f"Saved {owner.name} ({owner.availableHours}h available).")
+    new_name = owner_name.strip() or owner.name
+    if new_name != owner.name:
+        # A different name means a new owner profile — start fresh rather than
+        # dragging the previous owner's pets/tasks/preferences along.
+        owner = Owner(name=new_name, availableHours=int(available_hours))
+        scheduler.owner = owner
+        scheduler.pets = owner.pets
+        scheduler.tasks = owner.tasks
+        scheduler.schedule = []
+        save()
+        st.success(f"Created new owner {owner.name} ({owner.availableHours}h available).")
+        st.rerun()
+    else:
+        owner.setAvailableHours(int(available_hours))
+        save()
+        st.success(f"Saved {owner.name} ({owner.availableHours}h available).")
 
 st.divider()
 
@@ -112,6 +124,25 @@ if owner.pets:
         }
         for p in owner.pets
     ])
+    rc1, rc2 = st.columns([3, 1])
+    with rc1:
+        remove_name = st.selectbox("Remove a pet", [p.name for p in owner.pets], key="remove_pet_select")
+    with rc2:
+        st.write("")  # vertical spacer to align the button with the selectbox
+        if st.button("🗑️ Remove pet"):
+            owner.pets = [p for p in owner.pets if p.name != remove_name]
+            scheduler.pets = owner.pets
+            # Drop tasks that only applied to the removed pet; for shared tasks,
+            # just drop the reference so they keep applying to the remaining pets.
+            for task_list in (owner.tasks, scheduler.tasks):
+                for t in list(task_list):
+                    if any(p.name == remove_name for p in t.appliesTo):
+                        t.appliesTo = [p for p in t.appliesTo if p.name != remove_name]
+                        if not t.appliesTo:
+                            task_list.remove(t)
+            save()
+            st.success(f"🗑️ Removed {remove_name}.")
+            st.rerun()
 else:
     st.info("No pets yet. Add one above to start assigning tasks.")
     st.stop()  # Nothing below makes sense without at least one pet.
